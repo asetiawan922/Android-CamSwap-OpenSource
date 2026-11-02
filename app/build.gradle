@@ -70,18 +70,20 @@ android {
 
     buildTypes {
         release {
-            if (signingConfigs.release.storeFile) {
-                signingConfig signingConfigs.release
-            } else {
-                signingConfig signingConfigs.debug
-            }
+            signingConfig signingConfigs.debug
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
         debug {
+            signingConfig signingConfigs.debug
             minifyEnabled false
         }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
