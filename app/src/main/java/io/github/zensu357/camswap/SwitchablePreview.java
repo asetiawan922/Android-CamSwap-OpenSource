@@ -47,3 +47,4 @@ public class SwitchablePreview {
 
     public static native boolean nativeSetBuffersTransform(Surface surface, int transform);
 }
+
