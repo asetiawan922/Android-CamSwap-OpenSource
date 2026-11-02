@@ -2,12 +2,75 @@ package io.github.zensu357.camswap.utils;
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
+import android.graphics.Rect;
 
 public class ImageUtils {
 
     // Origin: https://blog.csdn.net/jacke121/article/details/73888732
     public static Bitmap getBMP(String file) throws Throwable {
         return BitmapFactory.decodeFile(file);
+    }
+
+    public static Bitmap rotateBitmap(Bitmap source, int degrees) {
+        if (source == null || (degrees % 360) == 0) {
+            return source;
+        }
+        Matrix matrix = new Matrix();
+        matrix.postRotate(degrees);
+        Bitmap rotated = Bitmap.createBitmap(source, 0, 0, source.getWidth(), source.getHeight(), matrix, true);
+        if (rotated != source) {
+            source.recycle();
+        }
+        return rotated;
+    }
+
+    public static Bitmap fitBitmapToTargetAspect(Bitmap source, int targetWidth, int targetHeight) {
+        if (source == null) {
+            return null;
+        }
+        if (targetWidth <= 0 || targetHeight <= 0) {
+            return source;
+        }
+
+        int sourceWidth = source.getWidth();
+        int sourceHeight = source.getHeight();
+        if (sourceWidth <= 0 || sourceHeight <= 0) {
+            return source;
+        }
+
+        float sourceAspect = (float) sourceWidth / (float) sourceHeight;
+        float targetAspect = (float) targetWidth / (float) targetHeight;
+
+        Rect cropRect;
+        if (Math.abs(sourceAspect - targetAspect) < 0.001f) {
+            cropRect = new Rect(0, 0, sourceWidth, sourceHeight);
+        } else if (sourceAspect > targetAspect) {
+            int croppedWidth = Math.max(1, Math.round(sourceHeight * targetAspect));
+            int left = Math.max(0, (sourceWidth - croppedWidth) / 2);
+            cropRect = new Rect(left, 0, Math.min(sourceWidth, left + croppedWidth), sourceHeight);
+        } else {
+            int croppedHeight = Math.max(1, Math.round(sourceWidth / targetAspect));
+            int top = Math.max(0, (sourceHeight - croppedHeight) / 2);
+            cropRect = new Rect(0, top, sourceWidth, Math.min(sourceHeight, top + croppedHeight));
+        }
+
+        Bitmap cropped = source;
+        if (cropRect.left != 0 || cropRect.top != 0 || cropRect.width() != sourceWidth
+                || cropRect.height() != sourceHeight) {
+            cropped = Bitmap.createBitmap(source, cropRect.left, cropRect.top, cropRect.width(), cropRect.height());
+            source.recycle();
+        }
+
+        if (cropped.getWidth() == targetWidth && cropped.getHeight() == targetHeight) {
+            return cropped;
+        }
+
+        Bitmap scaled = Bitmap.createScaledBitmap(cropped, targetWidth, targetHeight, true);
+        if (scaled != cropped) {
+            cropped.recycle();
+        }
+        return scaled;
     }
 
     public static byte[] rgb2YCbCr420(int[] pixels, int width, int height) {

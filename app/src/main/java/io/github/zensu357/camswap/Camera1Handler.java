@@ -19,6 +19,7 @@ import io.github.libxposed.api.XposedInterface;
 import io.github.zensu357.camswap.api101.Api101Runtime;
 
 import io.github.zensu357.camswap.utils.HookUtils;
+import io.github.zensu357.camswap.utils.ImageUtils;
 import io.github.zensu357.camswap.utils.VideoManager;
 import io.github.zensu357.camswap.utils.LogUtil;
 
@@ -410,24 +411,24 @@ public class Camera1Handler implements ICameraHandler {
     private byte[] buildPhotoFakeJpeg(Camera camera) {
         ensureCameraSize(camera);
 
-        byte[] nv21 = HookMain.data_buffer;
-        byte[] jpegData = null;
+        // 优先从当前视频文件抽取高清晰度、原始比例帧
+        byte[] jpegData = buildJpegFromCurrentVideoFrame();
 
-        if (nv21 != null && nv21.length >= 1) {
-            try {
-                android.graphics.YuvImage yuvImage = new android.graphics.YuvImage(nv21,
-                        android.graphics.ImageFormat.NV21, HookMain.mwidth, HookMain.mhight, null);
-                java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-                yuvImage.compressToJpeg(new android.graphics.Rect(0, 0, HookMain.mwidth, HookMain.mhight), 90, out);
-                jpegData = out.toByteArray();
-                LogUtil.log("【CS】Camera1 Photo Fake: 从 NV21 帧回调数据生成 JPEG");
-            } catch (Exception e) {
-                LogUtil.log("【CS】Camera1 截帧 JPEG 转换失败: " + e);
-            }
-        }
-
+        // 回退路径：若视频截帧失败，尝试使用 NV21 预览回调缓冲
         if (jpegData == null || jpegData.length == 0) {
-            jpegData = buildJpegFromCurrentVideoFrame();
+            byte[] nv21 = HookMain.data_buffer;
+            if (nv21 != null && nv21.length >= 1) {
+                try {
+                    android.graphics.YuvImage yuvImage = new android.graphics.YuvImage(nv21,
+                            android.graphics.ImageFormat.NV21, HookMain.mwidth, HookMain.mhight, null);
+                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                    yuvImage.compressToJpeg(new android.graphics.Rect(0, 0, HookMain.mwidth, HookMain.mhight), 90, out);
+                    jpegData = out.toByteArray();
+                    LogUtil.log("【CS】Camera1 Photo Fake: 从 NV21 帧回调数据生成 JPEG");
+                } catch (Exception e) {
+                    LogUtil.log("【CS】Camera1 截帧 JPEG 转换失败: " + e);
+                }
+            }
         }
 
         if (jpegData == null || jpegData.length == 0) {
@@ -487,25 +488,55 @@ public class Camera1Handler implements ICameraHandler {
             }
 
             android.media.MediaMetadataRetriever retriever = new android.media.MediaMetadataRetriever();
-            String videoPath = VideoManager.getCurrentVideoPath();
-            retriever.setDataSource(videoPath);
+            android.os.ParcelFileDescriptor pfd = VideoManager.getVideoPFD();
+            if (pfd != null) {
+                try {
+                    retriever.setDataSource(pfd.getFileDescriptor());
+                } finally {
+                    try { pfd.close(); } catch (Exception ignored) {}
+                }
+            } else {
+                String videoPath = VideoManager.getCurrentVideoPath();
+                if (videoPath == null) {
+                    retriever.release();
+                    return null;
+                }
+                retriever.setDataSource(videoPath);
+            }
+
             android.graphics.Bitmap frame = retriever.getFrameAtTime(currentPosMs,
-                    android.media.MediaMetadataRetriever.OPTION_CLOSEST);
+                    android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
             retriever.release();
 
             if (frame != null) {
-                if (frame.getWidth() != HookMain.mwidth || frame.getHeight() != HookMain.mhight) {
-                    android.graphics.Bitmap scaled = android.graphics.Bitmap.createScaledBitmap(
-                            frame, HookMain.mwidth, HookMain.mhight, true);
-                    frame.recycle();
-                    frame = scaled;
+                int userRotation = VideoManager.getConfig().getInt(ConfigManager.KEY_VIDEO_ROTATION_OFFSET, 0);
+                if (userRotation != 0) {
+                    frame = ImageUtils.rotateBitmap(frame, userRotation);
                 }
+
+                // 智能检测真实视频方向，避免竖屏视频被强行压成相机横屏预览尺寸导致画面拉伸
+                int targetW = HookMain.mwidth;
+                int targetH = HookMain.mhight;
+                boolean isPortrait = frame.getHeight() > frame.getWidth();
+                boolean targetIsPortrait = targetH > targetW;
+                if (isPortrait != targetIsPortrait) {
+                    int tmp = targetW;
+                    targetW = targetH;
+                    targetH = tmp;
+                    LogUtil.log("【CS】Camera1 Photo Fake: 目标方向匹配视频 (竖屏=" + isPortrait
+                            + "), 调整输出尺寸为 " + targetW + "x" + targetH);
+                }
+
+                android.graphics.Bitmap fitted = ImageUtils.fitBitmapToTargetAspect(frame, targetW, targetH);
                 java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
-                frame.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, bos);
+                fitted.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, bos);
                 byte[] jpegData = bos.toByteArray();
-                frame.recycle();
+                if (fitted != frame) {
+                    frame.recycle();
+                }
+                fitted.recycle();
                 LogUtil.log("【CS】Camera1 Photo Fake: 从视频文件截取帧生成 JPEG ("
-                        + HookMain.mwidth + "x" + HookMain.mhight + ")");
+                        + targetW + "x" + targetH + ")");
                 return jpegData;
             }
         } catch (Exception e) {

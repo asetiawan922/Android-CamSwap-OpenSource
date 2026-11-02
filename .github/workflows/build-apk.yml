@@ -1,0 +1,51 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Set up Android SDK & NDK
+        run: |
+          echo "Accepting licenses..."
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          echo "Installing required NDK, CMake, and Platform..."
+          sdkmanager "ndk;25.1.8937393" "cmake;3.22.1" "platforms;android-36" > /dev/null 2>&1
+          echo "Installed components successfully."
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build Debug and Release APKs
+        run: ./gradlew assembleDebug assembleRelease --stacktrace
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: CamSwap-APKs
+          path: app/build/outputs/apk/**/*.apk
+          retention-days: 30
+

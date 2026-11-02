@@ -36,6 +36,7 @@ import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 
+import io.github.zensu357.camswap.utils.ImageUtils;
 import io.github.zensu357.camswap.utils.LogUtil;
 import io.github.zensu357.camswap.utils.VideoManager;
 
@@ -2165,6 +2166,20 @@ public final class Camera2SessionHook {
             targetHeight = 720;
         }
 
+        // 智能匹配照片输出方向：
+        // Android 相机底层 Sensor 通常物理固定为横屏 (width > height)。
+        // 若当前输入视频是竖屏，则自动调换 targetWidth 和 targetHeight，
+        // 确保生成的 JPEG 照片是真实竖屏比例，防止在相册或应用中被强行横屏拉伸 (stretch)。
+        boolean isPortrait = isVideoEffectivelyPortrait();
+        boolean targetIsPortrait = targetHeight > targetWidth;
+        if (isPortrait != targetIsPortrait) {
+            int tmp = targetWidth;
+            targetWidth = targetHeight;
+            targetHeight = tmp;
+            LogUtil.log("【CS】JPEG Photo Fake: 目标方向匹配视频 (竖屏=" + isPortrait
+                    + "), 调整输出尺寸为 " + targetWidth + "x" + targetHeight);
+        }
+
         Bitmap frame = captureFrameForStill(targetWidth, targetHeight);
         if (frame == null) {
             LogUtil.log("【CS】无法获取可用静态帧");
@@ -2175,9 +2190,76 @@ public final class Camera2SessionHook {
     }
 
     /**
-     * 截取当前帧（使用渲染器当前旋转），用于 JPEG 拍照替换。
+     * 判断当前视频流或视频文件在考虑旋转后是否为竖屏画面。
+     */
+    private boolean isVideoEffectivelyPortrait() {
+        int userRotation = VideoManager.getConfig().getInt(ConfigManager.KEY_VIDEO_ROTATION_OFFSET, 0);
+
+        // 1. 优先从解码器直接读取元数据（最高效，无额外 I/O）
+        MediaCodecYuvDecoder dec = yuvDecoder;
+        if (dec != null && dec.isRunning() && dec.getVideoWidth() > 0 && dec.getVideoHeight() > 0) {
+            int w = dec.getVideoWidth();
+            int h = dec.getVideoHeight();
+            int rot = ((dec.getVideoRotation() + userRotation) % 360 + 360) % 360;
+            if (rot == 90 || rot == 270) {
+                return w > h;
+            } else {
+                return h > w;
+            }
+        }
+
+        // 2. 回退查询 MediaMetadataRetriever
+        try {
+            String currentPath = VideoManager.getCurrentVideoPath();
+            android.os.ParcelFileDescriptor pfd = VideoManager.getVideoPFD();
+            MediaMetadataRetriever mmr = new MediaMetadataRetriever();
+            try {
+                if (pfd != null) {
+                    mmr.setDataSource(pfd.getFileDescriptor());
+                } else if (currentPath != null) {
+                    mmr.setDataSource(currentPath);
+                } else {
+                    return false;
+                }
+                String wStr = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
+                String hStr = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
+                String rotStr = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION);
+
+                int w = wStr != null ? Integer.parseInt(wStr.trim()) : 0;
+                int h = hStr != null ? Integer.parseInt(hStr.trim()) : 0;
+                int rot = rotStr != null ? Integer.parseInt(rotStr.trim()) : 0;
+                rot = ((rot + userRotation) % 360 + 360) % 360;
+
+                if (w > 0 && h > 0) {
+                    if (rot == 90 || rot == 270) {
+                        return w > h;
+                    } else {
+                        return h > w;
+                    }
+                }
+            } finally {
+                mmr.release();
+                if (pfd != null) {
+                    try { pfd.close(); } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception e) {
+            LogUtil.log("【CS】isVideoEffectivelyPortrait 异常: " + e);
+        }
+        return false;
+    }
+
+    /**
+     * 截取当前帧，优先从原视频文件直接抽取高精度关键帧（保持纯正原始比例和高分辨率），
+     * 避免 OpenGL 预览 Surface 拉伸和降分辨率。
      */
     private Bitmap captureFrameForStill(int targetWidth, int targetHeight) {
+        if (!isReleasing && VideoManager.hasUsableMediaSource() && !VideoManager.isStreamMode()) {
+            Bitmap frame = captureFrameFromVideoFile(targetWidth, targetHeight);
+            if (frame != null && !isBitmapMostlyBlack(frame)) {
+                return frame;
+            }
+        }
         return captureFrameInternal(targetWidth, targetHeight, -1);
     }
 
@@ -2285,6 +2367,12 @@ public final class Camera2SessionHook {
             if (frame == null) {
                 return null;
             }
+
+            int userRotation = VideoManager.getConfig().getInt(ConfigManager.KEY_VIDEO_ROTATION_OFFSET, 0);
+            if (userRotation != 0) {
+                frame = ImageUtils.rotateBitmap(frame, userRotation);
+            }
+
             return fitBitmapToTargetAspect(frame, targetWidth, targetHeight);
         } catch (Exception e) {
             LogUtil.log("【CS】视频文件截帧失败: " + e);
@@ -2306,51 +2394,7 @@ public final class Camera2SessionHook {
     }
 
     private Bitmap fitBitmapToTargetAspect(Bitmap source, int targetWidth, int targetHeight) {
-        if (source == null) {
-            return null;
-        }
-        if (targetWidth <= 0 || targetHeight <= 0) {
-            return source;
-        }
-
-        int sourceWidth = source.getWidth();
-        int sourceHeight = source.getHeight();
-        if (sourceWidth <= 0 || sourceHeight <= 0) {
-            return source;
-        }
-
-        float sourceAspect = (float) sourceWidth / (float) sourceHeight;
-        float targetAspect = (float) targetWidth / (float) targetHeight;
-
-        Rect cropRect;
-        if (Math.abs(sourceAspect - targetAspect) < 0.001f) {
-            cropRect = new Rect(0, 0, sourceWidth, sourceHeight);
-        } else if (sourceAspect > targetAspect) {
-            int croppedWidth = Math.max(1, Math.round(sourceHeight * targetAspect));
-            int left = Math.max(0, (sourceWidth - croppedWidth) / 2);
-            cropRect = new Rect(left, 0, Math.min(sourceWidth, left + croppedWidth), sourceHeight);
-        } else {
-            int croppedHeight = Math.max(1, Math.round(sourceWidth / targetAspect));
-            int top = Math.max(0, (sourceHeight - croppedHeight) / 2);
-            cropRect = new Rect(0, top, sourceWidth, Math.min(sourceHeight, top + croppedHeight));
-        }
-
-        Bitmap cropped = source;
-        if (cropRect.left != 0 || cropRect.top != 0 || cropRect.width() != sourceWidth
-                || cropRect.height() != sourceHeight) {
-            cropped = Bitmap.createBitmap(source, cropRect.left, cropRect.top, cropRect.width(), cropRect.height());
-            source.recycle();
-        }
-
-        if (cropped.getWidth() == targetWidth && cropped.getHeight() == targetHeight) {
-            return cropped;
-        }
-
-        Bitmap scaled = Bitmap.createScaledBitmap(cropped, targetWidth, targetHeight, true);
-        if (scaled != cropped) {
-            cropped.recycle();
-        }
-        return scaled;
+        return ImageUtils.fitBitmapToTargetAspect(source, targetWidth, targetHeight);
     }
 
     private byte[] compressBitmapToJpeg(Bitmap frame, int maxBytes) {
