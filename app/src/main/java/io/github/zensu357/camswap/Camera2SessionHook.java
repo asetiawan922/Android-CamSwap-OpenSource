@@ -161,6 +161,97 @@ public final class Camera2SessionHook {
     }
 
     public final Map<Long, Surface> originalNativeToVirtualMap = new ConcurrentHashMap<>();
+    private final Map<Surface, SwitchablePreview> switchablePreviewMap = new ConcurrentHashMap<>();
+    private final Map<Long, SwitchablePreview> switchablePreviewNativeMap = new ConcurrentHashMap<>();
+    private final Map<Surface, Surface> cameraTargetMap = new ConcurrentHashMap<>();
+    private final Map<Long, Surface> cameraTargetNativeMap = new ConcurrentHashMap<>();
+    private final Set<Surface> cameraTargetSurfaces = Collections.newSetFromMap(new ConcurrentHashMap<Surface, Boolean>());
+
+    /** Public accessor to resolve camera target surface with SwitchablePreview support. */
+    public synchronized Surface getCameraTargetSurface(Surface output) {
+        if (output == null) return null;
+        if (cameraTargetSurfaces.contains(output)) {
+            return output;
+        }
+        Surface cached = cameraTargetMap.get(output);
+        if (cached != null && cached.isValid()) {
+            return cached;
+        }
+        long handle = getSurfaceNativeHandle(output);
+        if (handle != 0L) {
+            cached = cameraTargetNativeMap.get(handle);
+            if (cached != null && cached.isValid()) {
+                return cached;
+            }
+        }
+        SwitchablePreview sp = switchablePreviewMap.get(output);
+        if (sp == null && handle != 0L) {
+            sp = switchablePreviewNativeMap.get(handle);
+        }
+        if (sp != null) {
+            Surface ct = sp.getCameraSurface();
+            if (ct != null && ct.isValid()) {
+                return ct;
+            }
+        }
+
+        SwitchablePreview preview = SwitchablePreview.create(output);
+        if (preview != null) {
+            switchablePreviewMap.put(output, preview);
+            Surface ct = preview.getCameraSurface();
+            if (ct != null) {
+                cameraTargetSurfaces.add(ct);
+                cameraTargetMap.put(output, ct);
+                if (handle != 0L) {
+                    switchablePreviewNativeMap.put(handle, preview);
+                    cameraTargetNativeMap.put(handle, ct);
+                    long ctHandle = getSurfaceNativeHandle(ct);
+                    if (ctHandle != 0L) {
+                        cameraTargetNativeMap.put(ctHandle, ct);
+                    }
+                }
+                return ct;
+            }
+        }
+
+        Surface fallback = createVirtualSurface(0);
+        originalToVirtualMap.put(output, fallback);
+        cameraTargetMap.put(output, fallback);
+        if (handle != 0L) {
+            originalNativeToVirtualMap.put(handle, fallback);
+            cameraTargetNativeMap.put(handle, fallback);
+        }
+        return fallback;
+    }
+
+    /** Resolve media output surface associated with the given surface or alias. */
+    public Surface mediaOutputSurface(Surface output) {
+        if (output == null) return null;
+        SwitchablePreview sp = switchablePreviewMap.get(output);
+        if (sp == null) {
+            long handle = getSurfaceNativeHandle(output);
+            if (handle != 0L) {
+                sp = switchablePreviewNativeMap.get(handle);
+            }
+        }
+        if (sp != null) {
+            return sp.getMediaSurface();
+        }
+        return output;
+    }
+
+    /** Camera source toggled between real camera and virtual media */
+    public void onCameraSourceChanged() {
+        boolean original = SwitchablePreview.useOriginalCamera();
+        LogUtil.log("【CS】Camera2 onCameraSourceChanged: useOriginalCamera=" + original);
+        if (original) {
+            stopContinuousYuvPumper();
+            playerManager.releaseAllRenderers();
+        } else {
+            startPlayback();
+            restartYuvDecoderForSourceChange();
+        }
+    }
 
     /** Get the matched virtual surface for the original target surface. */
     public Surface getVirtualSurfaceFor(Surface originalSurface) {
@@ -192,6 +283,11 @@ public final class Camera2SessionHook {
     /** Mark virtual surface for recreation on next session creation. */
     public synchronized void invalidateVirtualSurface() {
         needRecreate = true;
+        switchablePreviewMap.clear();
+        switchablePreviewNativeMap.clear();
+        cameraTargetMap.clear();
+        cameraTargetNativeMap.clear();
+        cameraTargetSurfaces.clear();
     }
 
     /**

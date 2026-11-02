@@ -20,6 +20,7 @@ add_library(camswap-native-hook SHARED
     pcm_bridge.cpp
     hook_aaudio.cpp
     hook_opensles.cpp
+    buffer_transform.cpp
 )
 
 target_include_directories(camswap-native-hook PRIVATE
