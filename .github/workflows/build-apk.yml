@@ -30,11 +30,15 @@ jobs:
 
       - name: Set up Android SDK & NDK
         run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$(which sdkmanager || echo "")"
+          fi
+          echo "Using sdkmanager at: $SDKMANAGER"
           echo "Accepting licenses..."
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          yes | "$SDKMANAGER" --licenses || true
           echo "Installing required NDK, CMake, and Platform..."
-          sdkmanager "ndk;25.1.8937393" "cmake;3.22.1" "platforms;android-36" > /dev/null 2>&1
-          echo "Installed components successfully."
+          "$SDKMANAGER" "ndk;25.1.8937393" "cmake;3.22.1" "platforms;android-36"
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
@@ -48,4 +52,3 @@ jobs:
           name: CamSwap-APKs
           path: app/build/outputs/apk/**/*.apk
           retention-days: 30
-
